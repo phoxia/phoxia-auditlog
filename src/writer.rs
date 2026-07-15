@@ -8,7 +8,7 @@ use tokio::time::{interval, Duration};
 /// to PostgreSQL in batches inside a single transaction.
 pub struct BatchWriter {
     pool: PgPool,
-    table_name: String,
+    query: String,
     batch_size: usize,
     flush_interval: Duration,
     rx: mpsc::UnboundedReceiver<AuditEvent>,
@@ -17,9 +17,14 @@ pub struct BatchWriter {
 impl BatchWriter {
     /// Create a new batch writer. Takes ownership of the receiver.
     pub fn new(config: &AuditConfig, rx: mpsc::UnboundedReceiver<AuditEvent>) -> Self {
+        let query = format!(
+            "INSERT INTO {} (user_id, action, ip, method, path, status, latency_ms, metadata, service_name, ts) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            config.table_name
+        );
         Self {
             pool: config.pool.clone(),
-            table_name: config.table_name.clone(),
+            query,
             batch_size: config.batch_size,
             flush_interval: Duration::from_millis(config.flush_interval_ms),
             rx,
@@ -43,12 +48,12 @@ impl BatchWriter {
                             Some(event) => {
                                 buffer.push(event);
                                 if buffer.len() >= self.batch_size {
-                                    Self::flush_one(&self.pool, &self.table_name, &mut buffer).await;
+                                    Self::flush_one(&self.pool, &self.query, &mut buffer).await;
                                 }
                             }
                             // Channel closed — flush remaining and exit
                             None => {
-                                Self::flush_one(&self.pool, &self.table_name, &mut buffer).await;
+                                Self::flush_one(&self.pool, &self.query, &mut buffer).await;
                                 return;
                             }
                         }
@@ -56,7 +61,7 @@ impl BatchWriter {
                     // Timer tick — flush if we have buffered events
                     _ = ticker.tick() => {
                         if !buffer.is_empty() {
-                            Self::flush_one(&self.pool, &self.table_name, &mut buffer).await;
+                            Self::flush_one(&self.pool, &self.query, &mut buffer).await;
                         }
                     }
                 }
@@ -65,21 +70,21 @@ impl BatchWriter {
     }
 
     /// Drain the buffer and insert all events in a single transaction.
-    async fn flush_one(pool: &PgPool, table_name: &str, buffer: &mut Vec<AuditEvent>) {
+    async fn flush_one(pool: &PgPool, query: &str, buffer: &mut Vec<AuditEvent>) {
         if buffer.is_empty() {
             return;
         }
 
         let events = std::mem::take(buffer);
         let count = events.len();
-        let result = Self::insert_batch(pool, table_name, &events).await;
+        let result = Self::insert_batch(pool, query, &events).await;
 
         match result {
             Ok(_) => {
-                tracing::debug!(count, table_name, "Flushed audit events");
+                tracing::debug!(count, "Flushed audit events");
             }
             Err(e) => {
-                tracing::error!(count, table_name, error = %e, "Failed to flush audit events");
+                tracing::error!(count, error = %e, "Failed to flush audit events");
             }
         }
     }
@@ -87,19 +92,13 @@ impl BatchWriter {
     /// Insert a batch of events in a single transaction.
     async fn insert_batch(
         pool: &PgPool,
-        table_name: &str,
+        query: &str,
         events: &[AuditEvent],
     ) -> Result<(), sqlx::Error> {
         let mut tx = pool.begin().await?;
 
         for event in events {
-            let query = format!(
-                "INSERT INTO {} (user_id, action, ip, method, path, status, latency_ms, metadata, service_name, ts) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                table_name
-            );
-
-            sqlx::query(&query)
+            sqlx::query(query)
                 .bind(event.user_id)
                 .bind(&event.action)
                 .bind(event.ip.map(|ip| ip.to_string()))
@@ -124,14 +123,16 @@ mod tests {
     use super::*;
     use crate::context::AuditContext;
     use crate::config::AuditConfig;
-    use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
 
     /// Test that the batch writer drains its buffer on channel close.
     /// Uses a lazy pool (no real Postgres) — flush will fail gracefully
     /// but the writer must exit without panicking.
     #[tokio::test]
     async fn writer_drains_buffer_on_channel_close() {
-        let pool = PgPool::connect_lazy("postgres://localhost/nonexistent")
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://localhost/nonexistent")
             .expect("lazy pool always succeeds");
 
         let mut skip = std::collections::HashSet::new();

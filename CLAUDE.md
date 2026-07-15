@@ -1,5 +1,7 @@
 # phoxia-auditlog
 
+Extends the workspace [CLAUDE.md](../CLAUDE.md).
+
 Rust library published on crates.io. Phoxia projects import it to get automatic
 audit trails via Tower middleware. Not a service — a library.
 
@@ -63,7 +65,7 @@ async fn update_user(
 
 | Field | Source |
 |-------|--------|
-| `user_id` | PhoxiaID JWT `sub` claim |
+| `user_id` | Always `None` — JWT extraction not implemented yet |
 | `action` | `{method}:{path}` (e.g. `POST:/api/users`) |
 | `ip` | `X-Forwarded-For` or socket addr |
 | `method` | HTTP method |
@@ -76,16 +78,23 @@ async fn update_user(
 
 ```rust
 use phoxia_auditlog::Auditable;
+use serde_json::Value;
 
-#[derive(Debug, Serialize, Auditable)]
+// Implement manually — derive macro planned for v0.2
 struct User {
     id: Uuid,
     email: String,
     role: String,
 }
 
+impl Auditable for User {
+    fn to_audit_json(&self) -> Value {
+        serde_json::json!({ "id": self.id, "email": self.email, "role": self.role })
+    }
+}
+
 // After update:
-// audit_diff!(state.audit, auth, "user.updated", &old_user, &new_user);
+// audit_diff!(state.audit, "user.updated", &old_user, &new_user);
 // → stores {"before": {...}, "after": {...}, "changed": ["email"]}
 ```
 
@@ -133,3 +142,36 @@ cargo publish              # publish to crates.io
 - Examples for every public API item
 - Semver: breaking changes bump major
 - Integration tests against a real Postgres (testcontainers or Docker)
+
+<!-- PHOXIA-DEVKIT:START -->
+# Phoxia open-source development profile
+
+- Project instructions, accepted RFCs, schemas and tests are authoritative.
+- Products own their domains and private persistence.
+- Cross-domain integration uses versioned APIs, commands or Pulse events.
+- Pulse consumers are idempotent and projections are rebuildable.
+- Events record completed facts. Commands request intent.
+- Security, privacy, accessibility, cost and observability are architecture requirements.
+- Open-source readiness, community documentation and license compatibility are part of completion.
+- Use `Phoxia • Page` for page titles.
+- Avoid em dashes in normal product copy.
+- Prefer `web`, `api`, `mobile`, `worker`, `cli` and `docs` for application names.
+
+## Project context
+
+- Name: phoxia-auditlog
+- Purpose: Axum middleware for automatic PostgreSQL-backed audit logging.
+- Repository visibility: public
+- Documentation visibility: public
+- Distribution model: open-source
+
+## DevKit workflows
+
+- Inspect `.phoxia/project.yaml` before material changes.
+- Use the vendored Phoxia skills for development, project, release, documentation, UI and handoff workflows.
+- Preserve user-owned instructions outside the managed block.
+- A public version manifest change requires a changelog entry.
+- A user-facing contract or behavior change requires documentation.
+- Use a Feature Record for a significant capability, an ADR for an important local technical decision, and RFC analysis for cross-domain or governance changes.
+- Run `/phoxia-devkit` to review DevKit configuration.
+<!-- PHOXIA-DEVKIT:END -->
